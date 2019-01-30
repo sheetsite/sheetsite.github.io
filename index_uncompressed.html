@@ -1,0 +1,649 @@
+<!DOCTYPE HTML>
+<html>
+
+<head>
+    <script type="text/javascript">
+        window.onload = () => {
+            const exampleSite = `${document.location.href.split("#").shift()}#1LOIAjq90NeDJ3LEErShFGL7P7EC05KK-cV_IwZdnGPU`;
+            const state = {
+                zoom: 1,
+                siteResources: [],
+                filters: [],
+                sorting: [],
+                grouping: [],
+                filterOpts: [],
+                sortingOpts: [],
+                groupingOpts: [],
+                filteredResources: [],
+                lastFilterSearch: null,
+                lastSortingSearch: null,
+                lastGroupingSearch: null
+            };
+            const loadingState = { UNINITIALIZED: "UNINITIALIZED", UNLOADED: "UNLOADED", LOADING: "LOADING", LOADED: "LOADED" };
+            const store = {};
+            const zoomModifier = 200;
+            const scrollBuffer = 500;
+            const tinyLoading = `<div class="tiny-loading"><svg width="32px" height="32px" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid" class="lds-rolling"><circle cx="50" cy="50" fill="none" ng-attr-stroke="{{config.color}}" ng-attr-stroke-width="{{config.width}}" ng-attr-r="{{config.radius}}" ng-attr-stroke-dasharray="{{config.dasharray}}" stroke="#1d0e0b" stroke-width="10" r="30" stroke-dasharray="141.37166941154067 49.12388980384689" transform="rotate(250.996 50 50)"><animateTransform attributeName="transform" type="rotate" calcMode="linear" values="0 50 50;360 50 50" keyTimes="0;1" dur="1s" begin="0s" repeatCount="indefinite"></animateTransform></circle></svg></div>`;
+            let pendingDebounce = null;
+            const loadingDebounceTime = 200;
+            const optionDisplayLimit = 8;
+            const htmlFromStr = str => {
+                const temp = document.createElement("div");
+                temp.innerHTML = str;
+                const child = temp.firstChild;
+                temp.removeChild(child);
+                return child;
+            };
+            const getHashValue = key => {
+                const hash = {};
+                const rawHash = document.location.hash.slice(1);
+                rawHash.split("&").forEach(hv => {
+                    const firstEqualsI = hv.indexOf("=");
+                    if (firstEqualsI === -1) hash["id"] = hv;
+                    else hash[hv.slice(0, firstEqualsI)] = hv.slice(firstEqualsI + 1);
+                });
+                if (!key) return hash;
+                else return hash[key];
+            };
+            const retrieveSpreadSheet = (iteration) =>
+                new Promise((res, rej) => {
+                    const googleId = getHashValue("id");
+                    if (!googleId) throw new Error(`This site requires a google doc as configuration to be run. This should be defined as hash in your url. For example: ${exampleSite}`);
+                    const randomFnName = "jsonpcb_" + Math.random().toString(36).replace(/[^a-z]+/g, '').substr(0, 5);
+                    const url = `https://spreadsheets.google.com/feeds/cells/${googleId}/${iteration}/public/values?alt=json-in-script&callback=${randomFnName}`;
+                    const script = document.createElement("script");
+                    script.type = "text/javascript";
+                    script.src = url;
+                    window[randomFnName] = ({ feed: { entry, title: { $t: sheetName } } }) => {
+                        delete window[randomFnName];
+                        script.parentNode.removeChild(script);
+                        const rawSheetData = [];
+                        entry.forEach(({ gs$cell: { row, col, $t: value } }) => {
+                            row = parseInt(row, 10) - 1;
+                            col = parseInt(col, 10) - 1;
+                            if (!rawSheetData[row]) rawSheetData[row] = [];
+                            rawSheetData[row][col] = value;
+                        });
+                        const objKeys = rawSheetData[0];
+                        const sheetData = rawSheetData.slice(1).map((row) =>
+                            row.reduce((prev, cur, i) => {
+                                prev[objKeys[i]] = cur;
+                                return prev;
+                            }, {}));
+                        res({ sheetName, sheetData });
+                    }
+                    document.head.appendChild(script);
+                });
+            const addStyle = (st = "") => {
+                const style = document.createElement("style");
+                style.type = 'text/css';
+                style.innerHTML = st;
+                document.head.append(style);
+                return style;
+            };
+            const getConfig = (key, defaultVal = null) => {
+                const pagesKvp = store.siteConfig.filter(d => d.key === key).pop();
+                if (!pagesKvp || !pagesKvp.value) return null;
+                return pagesKvp.value;
+            };
+            const getConfigNumber = (key, defaultVal = null) => {
+                const val = getConfig(key, defaultVal);
+                if (val !== defaultVal) return parseFloat(val);
+                else return val;
+            };
+            const recalculateWidth = () => {
+                let resourceRule = Array.from(state.resourcesSheet.cssRules)
+                    .filter(r => r.selectorText === ".resource")
+                    .pop();
+                if (!resourceRule) {
+                    const ix = state.resourcesSheet.insertRule('.resource{}');
+                    resourceRule = state.resourcesSheet.cssRules[ix];
+                }
+                resourceRule.style.height = `${zoomModifier * state.zoom}px`;
+            }
+            const addToImageLoadingQueue = r => {
+                r.imageState = loadingState.LOADING;
+                r.anchor.dataset.imageState = r.imageState;
+                r.loadingImage = new Image();
+                r.loadingImage.crossOrigin = "anonymous";
+                const done = () => {
+                    const c = document.createElement("canvas");
+                    c.width = r.loadingImage.width;
+                    c.height = r.loadingImage.height;
+                    document.querySelector(".drawing-pad").appendChild(c);
+                    const context = c.getContext('2d');
+                    context.clearRect(0, 0, c.width, c.height);
+                    context.drawImage(r.loadingImage, 0, 0);
+                    r.previewShotSrc = c.toDataURL('image/jpeg', getConfigNumber("preview_snap_quality", 0.5));
+                    c.parentNode.removeChild(c);
+                    r.imgPreviewShot.src = r.previewShotSrc;
+                    //throw new Error("Todo: add class .mobile-show-preview when image in view AND is low res?");
+                    if (false) {
+
+                        //.mobile-show-preview
+                    }
+                    else {
+                        r.anchor.addEventListener('mouseenter', () => r.imgPreview.src = r.previewSrc);
+                        r.anchor.addEventListener('mouseleave', () => r.imgPreview.src = "");
+                    }
+                    r.imageState = loadingState.LOADED;
+                    r.anchor.dataset.imageState = r.imageState;
+                    r.loadingEl.parentNode.removeChild(r.loadingEl);
+                    delete r.loadingEl;
+                };
+                r.loadingImage.onload = done;
+                r.loadingImage.onerror = done;
+                r.loadingImage.src = r.previewSrc;
+            };
+            const addVisibleImagesToLoadingQueue = () => {
+                store.siteResources
+                    .filter(sR => sR.imageState === loadingState.UNINITIALIZED)
+                    .forEach(sR => {
+                        sR.imageState = loadingState.UNLOADED;
+                        sR.anchor.dataset.imageState = sR.imageState;
+                        sR.anchor.style.width = `${(sR.width / sR.height) * (zoomModifier * state.zoom)}px`;
+                        sR.topStart = sR.anchor.offsetTop;
+                        sR.topEnd = sR.topStart + sR.anchor.offsetHeight;
+                        if (!sR.loadingEl) {
+                            sR.anchor.appendChild(htmlFromStr(tinyLoading));
+                            sR.loadingEl = sR.anchor.querySelector('.tiny-loading');
+                        }
+                    });
+                document.documentElement.classList.toggle('scrolled-html', document.documentElement.scrollTop !== 0);
+                if (pendingDebounce) {
+                    clearTimeout(pendingDebounce);
+                    pendingDebounce = null;
+                }
+                pendingDebounce = setTimeout(() => {
+                    pendingDebounce = null;
+                    const topMin = document.documentElement.scrollTop;
+                    const topMax = topMin + document.documentElement.offsetHeight + scrollBuffer;
+                    store.siteResources
+                        .filter(sR => sR.imageState === loadingState.UNLOADED && sR.topStart <= topMax && sR.topEnd >= topMin)
+                        .forEach(addToImageLoadingQueue);
+                }, loadingDebounceTime);
+            };
+            const compare = (a, b) => a.trim().toLowerCase() === b.trim().toLowerCase();
+            const compareIn = (a, bb) => bb.split(",").some(b => compare(a, b));
+            const negativeVal = Math.floor(Number.MIN_SAFE_INTEGER / 2);
+            const asComparable = t => {
+                if (t === undefined) return negativeVal;
+                if (t === null) return negativeVal + 1;
+                t = t + "";
+                if (t === "") return negativeVal + 2;
+                if (t === "false") return negativeVal + 3;
+                if (t === "true") return negativeVal + 4;
+                if (t.search(/^\d+(\.\d+)?$/gi) !== -1) return parseFloat(t);
+                const d = new Date(t);
+                if (!isNaN(d)) return d.getTime();
+                return t;
+            };
+            const compareValues = ([{ field, dir }, ...moreSortOpts], a, b) => {
+                const fieldA = asComparable(a[field]), fieldB = asComparable(b[field]);
+                const diff = (
+                    (typeof fieldA === "string" || typeof fieldB === "string") ?
+                        (typeof fieldA === "string" ? fieldA : "").localeCompare(typeof fieldB === "string" ? fieldB : "") * -dir :
+                        (fieldB - fieldA) * dir);
+                return diff !== 0 ? diff : moreSortOpts.length ? compareValues(moreSortOpts, a, b) : 0;
+            }
+            const sortBy = (sortList = [], sortOpts = []) => {
+                sortOpts = Array.isArray(sortOpts) ? sortOpts : [sortOpts];
+                sortOpts = sortOpts.map(o => typeof o === "string" ? { field: o, dir: "asc" } : o.dir ? o : { ...o, dir: "asc" });
+                sortOpts.forEach(o => o.dir = o.dir.toLowerCase() === "asc" ? 1 : -1);
+                return sortList.sort(compareValues.bind(null, sortOpts));
+            };
+            const groupBy = (groupList = [], groupByField) => {
+                const groups = [];
+                groupList.forEach(l => {
+                    let g = groups.filter(g => g.key === l[groupByField]).pop();
+                    if (!g) groups.push({ key: l[groupByField], list: [l] });
+                    else g.list.push(l);
+                });
+                return groups.reduce((prev, cur) => prev.concat(cur.list), []);
+            };
+            const applyFiltersAndSorting = () => {
+                let res = store.siteResources.map(({ tagsAr, id }) => {
+                    const o = { id };
+                    tagsAr.reverse().forEach(({ category, value }) =>
+                        o[category] = o[category] ? o[category] + "," + value : value);
+                    Object.keys(o).forEach(oKey =>
+                        o[oKey] = o[oKey].split(",").sort().join(","));
+                    return o;
+                });
+                // filtering
+                res = res.filter(r => state.filters.every(({ category, value }) => r[category] && compareIn(value, r[category])));
+                const resIds = res.map(({ id }) => id);
+                const pendingRemoval = Array.from(document.querySelectorAll("main .resource")).filter(r => !resIds.includes(r.dataset.uid));
+                const pendingAddition = state.filteredResources.filter(r => resIds.includes(r.dataset.uid));
+                pendingRemoval.forEach(r => state.filteredResources.push(r.parentNode.removeChild(r)));
+                pendingAddition.forEach(r => document.querySelector('main').appendChild(r));
+                // add sorting
+                if (state.sorting.length) {
+                    res = sortBy(res, state.sorting.map(({ category: field, direction: dir }) => ({ field, dir })));
+                }
+                // add grouping
+                if (state.grouping.length) {
+                    res = groupBy(res, state.grouping.map(({ category }) => category));
+                }
+
+                // rearrange
+                res.forEach(({ id }) => document.querySelector("main").append(document.querySelector(`main [data-uid="${id}"]`)));
+
+                addVisibleImagesToLoadingQueue();
+            };
+            const tagWasSelected = evt => {
+                const matchingDataTag = Array.from(evt.target.list.options)
+                    .filter(({ value }) => value === evt.target.value)
+                    .pop();
+                if (matchingDataTag) {
+                    const { dataset: { tagCategory: category, tagValue: value, tagDirection: direction } } = matchingDataTag;
+                    const filterType = evt.target.closest(".filtering").dataset.text;
+                    if (filterType === "filters") {
+                        addFilter({ category, value });
+                    }
+                    else if (filterType === "sorting") {
+                        addSorting({ category, direction });
+                    }
+                    else if (filterType === "grouping") {
+                        addGrouping({ category, direction });
+                    }
+                }
+                evt.target.value = "";
+            };
+            const applyQuery = qStr => {
+                qStr.split("&").forEach(p => {
+                    let [key, cv] = p.split("=");
+                    key = key.toLowerCase().trim();
+                    if (key === "filter") {
+                        const [category, value] = cv.split(":");
+                        addFilter({ category, value });
+                    }
+                    else if (key === "orderby") {
+                        const direction = cv.endsWith("Desc") ? "desc" : "asc";
+                        const category = cv.endsWith("Desc") ? cv.slice(0, -"Desc".length) :
+                            cv.endsWith("Asc") ? cv.slice(0, -"Asc".length) :
+                                cv;
+                        addSorting({ category, direction });
+                    }
+                    else if (key === "groupby") {
+                        addGrouping({ category: cv });
+                    }
+                    else {
+                        console.error(`Unrecognized defauly paramater '${p}'.`);
+                    }
+                });
+            };
+            const addFilter = tagProperties => {
+                const filterTags = Array.from(document.querySelectorAll('.filters .tag'));
+                if (
+                    filterTags.length <= 3 &&
+                    !filterTags.some(t => compare(tagProperties.category, t.dataset.tagCategory) && compare(tagProperties.value, t.dataset.tagValue))) {
+                    const d = document.createElement("div");
+                    d.innerHTML = createTag(tagProperties);
+                    const tagEl = d.firstChild;
+                    document.querySelector('.filters').append(tagEl);
+                    tagEl.addEventListener('click', anchorClicked);
+                    document.querySelector('.filtering.filters').classList.toggle('filtering-short', filterTags.length >= 3);
+                    state.filters.push(tagProperties);
+                    applyFiltersAndSorting();
+                }
+            };
+            const addSorting = tagProperties => {
+                const sortingTags = Array.from(document.querySelectorAll('.sorting .tag'));
+                const matchingCats = sortingTags.filter(t => compare(tagProperties.category, t.dataset.tagCategory));
+                if (sortingTags.length <= 3) {
+                    if (matchingCats.length > 0) {
+                        matchingCats.forEach(c => removeSorting(c.dataset));
+                    }
+                    const d = document.createElement("div");
+                    d.innerHTML = createTag(tagProperties);
+                    const tagEl = d.firstChild;
+                    document.querySelector('.sorting').append(tagEl);
+                    tagEl.addEventListener('click', anchorClicked);
+                    document.querySelector('.filtering.sorting').classList.toggle('filtering-short', sortingTags.length >= 3);
+                    state.sorting.push(tagProperties);
+                    console.log(state.sorting)
+                    applyFiltersAndSorting();
+                }
+            };
+            const addGrouping = tagProperties => {
+                removeGrouping();
+                const d = document.createElement("div");
+                d.innerHTML = createTag(tagProperties);
+                const tagEl = d.firstChild;
+                document.querySelector('.grouping').append(tagEl);
+                tagEl.addEventListener('click', anchorClicked);
+                state.grouping.push(tagProperties);
+                applyFiltersAndSorting();
+            };
+            const removeFilter = tagProperties => {
+                const { tagCategory: c1, tagValue: v1 } = tagProperties;
+                state.filters.splice(state.filters.findIndex(({ category: c2, value: v2 }) => compare(c1, c2) && compare(v1, v2)), 1);
+                document.querySelector(".filtering.filters").removeChild(document.querySelector(`[data-tag-category='${c1}'][data-tag-value='${v1}']`));
+                applyFiltersAndSorting();
+            };
+            const removeSorting = tagProperties => {
+                const { tagCategory: c1, tagDirection: v1 } = tagProperties;
+                state.sorting.splice(state.sorting.findIndex(({ category: c2, direction: v2 }) => compare(c1, c2) && compare(v1, v2)), 1);
+                document.querySelector(".filtering.sorting").removeChild(document.querySelector(`[data-tag-category='${c1}'][data-tag-direction='${v1}']`));
+                applyFiltersAndSorting();
+            };
+            const removeGrouping = () => {
+                if (state.grouping.length > 0) {
+                    state.grouping = [];
+                    document.querySelector(".filtering.grouping").removeChild(document.querySelector(".filtering.grouping .tag"));
+                    applyFiltersAndSorting();
+                }
+            };
+            const anchorClicked = evt => {
+                if (!evt.target.matches("img")) {
+                    evt.preventDefault();
+                }
+                if (evt.target.matches(".tag")) {
+                    if (evt.target.closest(".tag-container")) {
+                        addFilter({ category: evt.target.dataset.tagCategory, value: evt.target.dataset.tagValue });
+                    } else if (evt.target.closest(".filtering.filters")) {
+                        const tagEl = evt.target.closest('.tag');
+                        if (tagEl) removeFilter(tagEl.dataset);
+                    } else if (evt.target.closest(".filtering.sorting")) {
+                        const tagEl = evt.target.closest('.tag');
+                        if (tagEl) removeSorting(tagEl.dataset);
+                    } else if (evt.target.closest(".filtering.grouping")) {
+                        removeGrouping();
+                    }
+                }
+            };
+            const createTag = ({ category, value, direction }) => value ?
+                `<div class="tag preview-tag" data-tag-category="${category}" data-tag-value="${value}">${value}</div>` :
+                direction ?
+                    `<div class="tag preview-tag" data-tag-category="${category}" data-tag-direction="${direction}">${category} ${direction.toLowerCase() === "asc" ? `↑` : `↓`}</div>` :
+                    `<div class="tag preview-tag" data-tag-category="${category}">${category}</div>`;
+            const setupDataLists = () => {
+                const allCategories = [], allValues = [];
+                store.siteResources.forEach(({ tagsAr = [] }) =>
+                    tagsAr.forEach(({ category, value }) => {
+                        if (allCategories.indexOf(category) === -1) allCategories.push(category);
+                        if (value && value !== "*") {
+                            const val = `${category}:${value}`;
+                            if (allValues.indexOf(val) === -1) allValues.push(val);
+                        }
+                    }));
+                state.filterOpts = allValues.filter(v => {
+                    const [optCat, optVal] = v.split(":");
+                    let tagMatches = store.siteTags.filter(({ tagCategory, tagValue }) => compare(optCat, tagCategory) && compare(optVal, tagValue));
+                    if (!tagMatches.length) tagMatches = store.siteTags.filter(({ tagCategory, tagValue }) => compare(optCat, tagCategory) && tagValue === "*");
+                    return !tagMatches.length || tagMatches.every(({ filterable }) => filterable.toLowerCase() !== "false");
+                });
+                state.sortingOpts = allCategories.filter(optCat => {
+                    let tagMatches = store.siteTags.filter(({ tagCategory, tagValue }) => compare(optCat, tagCategory) && tagValue === "*");
+                    return !tagMatches.length || tagMatches.every(({ sortable }) => sortable.toLowerCase() !== "false");
+                });
+                state.groupingOpts = state.sortingOpts.slice(0);
+            };
+            const clearEl = parentEl => {
+                while (parentEl && parentEl.firstChild) parentEl.removeChild(parentEl.firstChild);
+            };
+            const renderFilteringListOpts = () => {
+                const term = document.querySelector("#filters-input").value;
+                if (term !== state.lastFilterSearch) {
+                    state.lastFilterSearch = term;
+                    let opts = state.filterOpts.slice(0);
+                    if (term) opts = opts.filter(o => o.includes(term));
+                    const parentEl = document.querySelector("#filtering-opts");
+                    clearEl(parentEl);
+                    opts.slice(0, optionDisplayLimit).forEach(o => {
+                        const [category, value] = o.split(":");
+                        const oEl = document.createElement("option");
+                        oEl.innerText = o;
+                        oEl.dataset.tagCategory = category;
+                        oEl.dataset.tagValue = value;
+                        parentEl.append(oEl);
+                    });
+                }
+            };
+            const renderSortingListOpts = () => {
+                const term = document.querySelector("#sorting-input").value;
+                if (term !== state.lastSortingSearch) {
+                    state.lastSortingSearch = term;
+                    let opts = state.sortingOpts.slice(0);
+                    if (term) opts = opts.filter(o => o.includes(term));
+                    opts = opts.slice(0, optionDisplayLimit);
+                    const parentEl = document.querySelector("#sorting-opts");
+                    clearEl(parentEl);
+                    opts.slice(0, optionDisplayLimit).forEach(o => {
+                        let oEl = document.createElement("option");
+                        oEl.innerHTML = `${o} &uarr;`;
+                        oEl.dataset.tagCategory = o;
+                        oEl.dataset.tagDirection = "asc";
+                        parentEl.append(oEl);
+                        oEl = document.createElement("option");
+                        oEl.innerHTML = `${o} &darr;`;
+                        oEl.dataset.tagCategory = o;
+                        oEl.dataset.tagDirection = "desc";
+                        parentEl.append(oEl);
+                    });
+                }
+            };
+            const renderGroupingListOpts = () => {
+                const term = document.querySelector("#grouping-input").value;
+                if (term !== state.lastGroupingSearch) {
+                    state.lastGroupingSearch = term;
+                    let opts = state.groupingOpts.slice(0);
+                    if (term) opts = opts.filter(o => o.includes(term));
+                    opts = opts.slice(0, optionDisplayLimit);
+                    const parentEl = document.querySelector("#grouping-opts");
+                    clearEl(parentEl);
+                    opts.slice(0, optionDisplayLimit).forEach(o => {
+                        const oEl = document.createElement("option");
+                        oEl.innerText = o;
+                        oEl.dataset.tagCategory = o;
+                        parentEl.append(oEl);
+                    });
+                }
+            };
+            const renderListOpts = () => {
+                renderFilteringListOpts();
+                renderSortingListOpts();
+                renderGroupingListOpts();
+            };
+            Promise.resolve()
+                .then(() => {
+                    state.resourcesSheet = addStyle().sheet;
+                    addStyle(`
+                        html{height:100%;}
+                        body{margin:0;padding:0;height:100%;background-color: var(--main-color1);font-family:var(--main-font);text-align: center;}
+                        header{width:100%;height:170px;text-align: center;background-color: var(--main-color2);position: fixed;top: 0;left: 0;z-index: 1;border-bottom: 2px solid var(--main-color1);transition: all 0.5s;z-index:3;background-position: center;background-repeat: no-repeat;}
+                        header h1{font-size: 80px;line-height: 130px;margin: 0;transition: all 0.5s;}
+                        main{min-width: 400px;display: inline-block;box-sizing: border-box;width: calc(100% - 300px);min-height: calc(100% - 35px);padding: 170px 0 25px 0;text-align: center;transition: padding 0.5s;}
+                        .scrolled-html header{height:35px;}
+                        .scrolled-html header h1{font-size: 20px;line-height: 35px;}
+                        .scrolled-html main{padding-top:35px;}
+                        .scrolled-html .filtering-container, .filtering-container.loading{display:none;}
+                        .resource{display: inline-block;border: 1px solid var(--main-color2);box-sizing: border-box;margin: 25px 10px 0 10px;position: relative;background: var(--main-color2);}
+                        .resource:hover{z-index: 1;}
+                        .resource img{position: absolute;left: 0;top: 0;}
+                        .resource:hover .previewShot, .resource.mobile-show-preview .previewShot{display:none;}
+                        .resource .previewShot{display:inline-block;}
+                        .resource:hover .preview, .resource.mobile-show-preview .preview{display:inline-block;z-index: 2;}
+                        .resource .preview{display:none;}
+                        .resource:hover .resource-options{background: var(--main-color3);position: absolute;left: -10px;right: -10px;top: -10px;bottom: -10px;border: 2px solid var(--main-color2);border-bottom: none;}
+                        footer{font-weight: bold;width:100%;height:35px;text-align: center;font-size: 20px;line-height: 35px;background-color: var(--main-color2);background-position: center;background-repeat: no-repeat;}
+                        .load-container, .loading-container{background: #fff;z-index:99;position:absolute;top:0;left:0;right:0;bottom:0;display: flex;align-items: center;justify-content: center;font-family:verdana;font-size: 11px;}
+                        .load-dialog{background: #fdfdfd;padding: 20px 30px 30px 30px;border-radius: 5px;border: 3px solid #a7a7a7;max-width: 600px;}
+                        .load-dialog a{position: relative;font-size: 11px;bottom: 2px;}
+                        .load-dialog h1{font-size: 30px;}
+                        .load-dialog h2{font-size: 13px;}
+                        .tiny-loading{display: flex;align-items: center;justify-content: center;position: absolute;left: 0;right: 0;top: 0;bottom: 0;}
+                        .drawing-pad{position:absolute;right:100%;top:0;}                        
+                        .tag-container{display:none;position: absolute;overflow: auto;top: calc( 100% - 2px);background: var(--main-color3);left: -2px;min-width: calc(100% + 4px);border-width: 2px;border-style: solid;border-color: var(--main-color2);padding: 0 10px 10px 10px;box-sizing: border-box;z-index: -1;}
+                        .resource:hover .tag-container{display:block;}
+                        .tag{opacity:0.8;cursor:pointer;padding: 2px 5px;border-radius: 3px;font-family: verdana;font-size: 12px;font-weight: bold;}
+                        .tag:hover{opacity:1;}
+                        .resource .tag{margin:5px 5px 0 0;float:left;display:inline-block;}
+                        .filtering .tag{margin: 0 5px 5px 0;display:inline;}
+                        .filtering-container{text-align: center;height: 40px;font-family: verdana;font-size: 13px;line-height: 18px;min-width: 400px;width: calc(100% - 300px);display: inline-block;white-space: nowrap;}
+                        @media (min-width: 600px){ .filtering-container{width:100%;} }
+                        .filtering-container .filtering{line-height: 22px;white-space: nowrap;text-overflow: ellipsis;text-align:left;overflow: hidden;position:relative;background: #c5c5c5;max-width: 400px;height: 30px;border-radius: 3px;display: inline-block;margin: 0 5px;padding: 4px 65px 0 80px;box-sizing: border-box;transition: all 0.2s;cursor:text;position:relative;}
+                        .filtering-container .filtering input{position: absolute;top: 3px;bottom: 3px;right: 3px;width: 60px;background: transparent;border: none;}
+                        .filtering-container .filtering-short{padding: 4px 0 0 65px;}
+                        .filtering-container .filtering::before{content: attr(data-text);position: absolute;opacity: 0.5;left: 15px;top: 4px;}
+                    `);
+                })
+                .then(() => retrieveSpreadSheet(1))
+                .then(async ({ sheetName, sheetData }) => {
+                    store[sheetName] = sheetData;
+                    if (sheetName !== "siteConfig") throw new Error("First sheet should always be named 'siteConfig', please re-order sheets if needed.");
+                    const pagesCount = getConfigNumber("pages");
+                    if (pagesCount === null) throw new Error("siteConfig needs to define 'pages' value as number of pages to load.");
+                    for (let i = 2; i <= pagesCount; i++) {
+                        const result = await retrieveSpreadSheet(i);
+                        store[result.sheetName] = result.sheetData;
+                    }
+                    if (!store.siteResources) store.siteResources = [];
+                    if (!store.siteTags) store.siteTags = [];
+                    store.siteResources.forEach(sR =>
+                        sR.tagsAr = sR.tags.split(" ").filter(s => !!s).map(tg => ({ category: tg.split(":")[0], value: tg.split(":")[1] })));
+                })
+                .then(() => new Promise((resolve, reject) => {
+                    document.body.innerHTML += `
+                        <div class="load-container">
+                            <section class="load-dialog">
+                                <h1>Welcome to sheets siteloader</h1>
+                                <h1>&ldquo;${getConfig("head_text", "Unnamed Site")}&rdquo;</h1>
+                                <div>(<a href="#" target="_blank">Google Sheet &quot;<span></span>&quot;</a>)</div>
+                                <br />
+                                <br />
+                                <div>
+                                    Sheets siteloader attempts to build a complete gallery website based on configuration and resources defined in a google sheet.<br/><br/>
+                                    <b>Please only click Continue if you trust the google sheet linked above. If you are unsure we would recommend clicking Go Back.</b><br /><br/>                                                                        
+                                </div>
+                                <h2 class="custom_text"></h2>
+                                <br />
+                                <button class="continue">Continue</button>
+                                <button class="cancel">Go back</button>
+                            </section>
+                        </div>
+                    `;
+                    document.querySelector(".load-dialog a span").innerText = getHashValue("id").toLowerCase();
+                    document.querySelector(".load-dialog a").href = `https://docs.google.com/spreadsheets/d/${getHashValue("id")}/`;
+                    document.querySelector(".custom_text").innerText = getConfig("enter_dialog", "Are you sure you want to enter?").slice(0, 200);
+                    document.querySelector(".continue").addEventListener("click", resolve);
+                    document.querySelector(".cancel").addEventListener("click", () => window.history.back());
+                    document.body.removeChild(document.querySelector(".loading-container"));
+                }))
+                .then(() => {
+                    /*
+                    desktop_preview	onhover
+                    mobile_preview	always*/
+                    document.body.removeChild(document.querySelector(".load-container"));
+                    document.querySelector(".filtering-container").classList.remove("loading");
+                    addStyle(`
+                        :root { 
+                            --main-color1: ${getConfig("color1", "#000")}; 
+                            --main-color2: ${getConfig("color2", "#fff")}; 
+                            --main-color3: ${getConfig("color3", "#fff")}; 
+                            --main-font: ${getConfig("font1", "#fff")}; 
+                        }
+                    `);
+                    document.querySelector("header h1").innerText = getConfig("head_text", "...");
+                    const headerImageUrl = getConfig("head_image");
+                    if (headerImageUrl) document.querySelector("header").style.backgroundImage = `url('${headerImageUrl}')`;
+                    const footerImageUrl = getConfig("foot_image");
+                    if (footerImageUrl) document.querySelector("footer").style.backgroundImage = `url('${footerImageUrl}')`;
+                    document.querySelector("footer").innerText = getConfig("foot_text", "...");
+                    addStyle(store.siteTags.map(({ tagCategory, tagValue = "*", tagColor1 = "#000", tagColor2 = "#fff" }) => {
+                        return `
+                            ${tagCategory ? "[data-tag-category=" + tagCategory + "]" : ""}${tagValue !== "*" ? "[data-tag-value=" + tagValue + "]" : ""} 
+                            {
+                                background-color: ${tagColor1};
+                                color: ${tagColor2};
+                            }`;
+                    }).join('\r\n'));
+                    setupDataLists();
+                    renderListOpts();
+                    document.querySelector("#filters-input").addEventListener("keyup", renderFilteringListOpts);
+                    document.querySelector("#filters-input").addEventListener("change", evt => { tagWasSelected(evt); renderFilteringListOpts(evt); });
+                    document.querySelector("#sorting-input").addEventListener("keyup", renderSortingListOpts);
+                    document.querySelector("#sorting-input").addEventListener("change", evt => { tagWasSelected(evt); renderSortingListOpts(evt); });
+                    document.querySelector("#grouping-input").addEventListener("keyup", renderGroupingListOpts);
+                    document.querySelector("#grouping-input").addEventListener("change", evt => { tagWasSelected(evt); renderGroupingListOpts(evt); });
+                    window.addEventListener('scroll', addVisibleImagesToLoadingQueue);
+                    document.querySelector("main").innerHTML = store.siteResources.map(
+                        ({ id, dateAdded, name, linkUrl, previewSrc, width, height, tagsAr }) => {
+                            const data_attributes = tagsAr.map(({ category, value }) => `data-${category}="${value}"`).join(' ');
+                            const data_tags = tagsAr.map(createTag).join(' ');
+                            return `
+                                <a href="${linkUrl}" data-image-state="${loadingState.UNINITIALIZED}" class="resource" data-uid="${id}" ${data_attributes}>
+                                    <div class="resource-options">
+                                        <div class="tag-container">
+                                            ${data_tags}
+                                        </div>
+                                    </div>
+                                    <img class="previewShot" height="100%" width="100%" />
+                                    <img class="preview" height="100%" width="100%" />
+                                </a>
+                            `;
+                        }).join('');
+                    store.siteResources.forEach(sR => {
+                        sR.imageState = loadingState.UNINITIALIZED;
+                        sR.anchor = document.querySelector(`main [data-uid="${sR.id}"]`);
+                        sR.imgPreviewShot = sR.anchor.querySelector('.previewShot');
+                        sR.imgPreview = sR.anchor.querySelector('.preview');
+                        sR.anchor.addEventListener('click', anchorClicked);
+                    });
+                    Array.from(document.querySelectorAll(".filtering")).forEach(f => f.addEventListener("focus", () => f.querySelector("input").click()));
+                    const defaultQuery = getConfig("default_query");
+                    if (defaultQuery) applyQuery(defaultQuery);
+                    applyFiltersAndSorting();
+                    recalculateWidth();
+                    addVisibleImagesToLoadingQueue();
+                })
+                .then(() => console.log(store))
+                .catch(er => {
+                    const loadingContainer = document.body.querySelector(".loading-container");
+                    if (loadingContainer) document.body.removeChild(loadingContainer);
+                    const h1 = document.createElement("h1");
+                    h1.innerText = "Error occured while loading sheets gallery";
+                    const h2 = document.createElement("h2");
+                    h2.innerText = er;
+                    document.querySelector("main").appendChild(h1);
+                    document.querySelector("main").appendChild(h2);
+                });
+        };
+    </script>
+</head>
+
+<body>
+    <header>
+        <h1></h1>
+        <div class="filtering-container loading">
+            <label class="filtering filters" data-text="filters" tabindex="1" for="filters-input">
+                <input id="filters-input" list="filtering-opts" type="text" />
+            </label>
+            <datalist id="filtering-opts"></datalist>
+            <label class="filtering sorting" data-text="sorting" tabindex="2" for="sorting-input">
+                <input id="sorting-input" list="sorting-opts" type="text" />
+            </label>
+            <datalist id="sorting-opts"></datalist>
+            <label class="filtering grouping" data-text="grouping" tabindex="3" id="grouping-input">
+                <input id="grouping-input" list="grouping-opts" type="text" />
+            </label>
+            <datalist id="grouping-opts"></datalist>
+        </div>
+    </header>
+    <main></main>
+    <footer></footer>
+    <div class="drawing-pad"></div>
+    <div class="loading-container">
+        <svg width="200px" height="200px" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid"
+            style="background: none;">
+            <circle cx="50" cy="50" fill="none" stroke="#1d0e0b" stroke-width="3" r="16" stroke-dasharray="75.39822368615503 27.132741228718345"
+                transform="rotate(143.85 50 50)">
+                <animateTransform attributeName="transform" type="rotate" calcMode="linear" values="0 50 50;360 50 50"
+                    keyTimes="0;1" dur="1s" begin="0s" repeatCount="indefinite"></animateTransform>
+            </circle>
+        </svg>
+    </div>
+</body>
+
+</html>
