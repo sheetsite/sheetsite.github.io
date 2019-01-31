@@ -12,7 +12,7 @@ This website is an experiment to see if a complicated video gallery website can 
 ## How to use
 Creating your own sheets site is as easy as:
 1) Logging into google sheets using your google account.
-2) Create a copy of Nature Sheet (here), this can be used as a template for your own website.
+2) Create a copy of [Nature Sheet available here](https://docs.google.com/spreadsheets/d/1LOIAjq90NeDJ3LEErShFGL7P7EC05KK-cV_IwZdnGPU/edit?usp=sharing) by navigating to File > Make a copy, this can be used as a template for your own website.
 2.1) Modify Nature config sheet to style the website as you please.
 2.2) Modify Nature resource and tag sheets to include the content you want.
 2.3) Generate any resource previews ...
